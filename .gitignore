@@ -1,0 +1,21 @@
+# Binaries
+surely
+surely-server
+surely-client
+client
+
+# Certificate files
+server.crt
+server.key
+
+# Configuration files
+config.toml
+client-config.toml
+
+# Development files
+CheckingList
+DevelopingPlan
+
+# Go
+go.work
+go.work.sum

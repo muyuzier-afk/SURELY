@@ -1,13 +1,20 @@
 package main
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"flag"
 	"log"
+	"math/big"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"surely/internal/config"
 	"github.com/quic-go/quic-go/http3"
@@ -15,11 +22,24 @@ import (
 
 func main() {
 	configPath := flag.String("config", "config.toml", "Path to configuration file")
+	createSSL := flag.Bool("creat-ssl", false, "Create TLS certificate and key files")
 	flag.Parse()
 
-	log.Println("Surely Server v1.0 starting...")
+	// 处理 --creat-ssl 选项
+	if *createSSL {
+		log.Println("Creating TLS certificate and key files...")
+		if err := createTLSCertificates(); err != nil {
+			log.Fatalf("Failed to create TLS certificates: %v", err)
+		}
+		log.Println("TLS certificate and key files created successfully!")
+		log.Println("Files created:")
+		log.Println("- server.key (private key)")
+		log.Println("- server.crt (certificate)")
+		return
+	}
 
-	// 加载配置文件
+	log.Println("Surely Server v1.0.1 starting...")
+
 	cfg, err := config.LoadServerConfig(*configPath)
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
@@ -75,5 +95,48 @@ func main() {
 
 	<-sigChan
 	log.Println("Shutting down...")
+}
+
+// createTLSCertificates 创建 TLS 证书和密钥文件
+func createTLSCertificates() error {
+	// 生成私钥
+	privKey, err := rsa.GenerateKey(rand.Reader, 4096)
+	if err != nil {
+		return err
+	}
+
+	// 创建证书模板
+	template := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			Organization: []string{"Surely Proxy"},
+			CommonName:   "localhost",
+		},
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().Add(365 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+		DNSNames:     []string{"localhost"},
+	}
+
+	// 生成证书
+	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &privKey.PublicKey, privKey)
+	if err != nil {
+		return err
+	}
+
+	// 保存证书
+	if err := os.WriteFile("server.crt", certDER, 0644); err != nil {
+		return err
+	}
+
+	// 保存私钥
+	privKeyDER := x509.MarshalPKCS1PrivateKey(privKey)
+	if err := os.WriteFile("server.key", privKeyDER, 0600); err != nil {
+		return err
+	}
+
+	return nil
 }
 

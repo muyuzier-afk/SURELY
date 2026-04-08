@@ -3,12 +3,20 @@ package transport
 import (
 	"context"
 	"crypto/tls"
+	"io"
 	"log"
 	"math/rand"
 	"time"
 
 	"github.com/quic-go/quic-go"
 )
+
+// Stream 简单的流接口
+type Stream interface {
+	io.Reader
+	io.Writer
+	io.Closer
+}
 
 // Config 传输层配置
 type Config struct {
@@ -18,7 +26,7 @@ type Config struct {
 
 // Server 传输层服务器
 type Server struct {
-	listener *quic.Listener
+	listener quic.Listener
 	config   *Config
 }
 
@@ -70,18 +78,43 @@ func NewClient(ctx context.Context, addr string, config *Config) (*Client, error
 }
 
 // OpenStream 打开新的流
-func (c *Client) OpenStream() (quic.Stream, error) {
-	return c.conn.OpenStream()
+func (c *Client) OpenStream() (Stream, error) {
+	stream, err := c.conn.OpenStreamSync(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	return &streamWrapper{stream: stream}, nil
 }
 
 // AcceptStream 接受新的流
-func (c *Client) AcceptStream(ctx context.Context) (quic.Stream, error) {
-	return c.conn.AcceptStream(ctx)
+func (c *Client) AcceptStream(ctx context.Context) (Stream, error) {
+	stream, err := c.conn.AcceptStream(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &streamWrapper{stream: stream}, nil
 }
 
 // Close 关闭连接
 func (c *Client) Close() error {
 	return c.conn.CloseWithError(0, "")
+}
+
+// streamWrapper 包装 quic.Stream 以实现简单的接口
+type streamWrapper struct {
+	stream quic.Stream
+}
+
+func (w *streamWrapper) Read(p []byte) (n int, err error) {
+	return w.stream.Read(p)
+}
+
+func (w *streamWrapper) Write(p []byte) (n int, err error) {
+	return w.stream.Write(p)
+}
+
+func (w *streamWrapper) Close() error {
+	return w.stream.Close()
 }
 
 // GeneratePadding 生成低熵填充数据
@@ -127,10 +160,6 @@ func TLSConfigForServer(certPath, keyPath string, nextProtos []string) (*tls.Con
 			tls.TLS_AES_128_GCM_SHA256,
 			tls.TLS_AES_256_GCM_SHA384,
 			tls.TLS_CHACHA20_POLY1305_SHA256,
-			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
 		},
 		CurvePreferences: []tls.CurveID{
 			tls.X25519,
@@ -151,10 +180,6 @@ func TLSConfigForClient(insecureSkipVerify bool, nextProtos []string) *tls.Confi
 			tls.TLS_AES_128_GCM_SHA256,
 			tls.TLS_AES_256_GCM_SHA384,
 			tls.TLS_CHACHA20_POLY1305_SHA256,
-			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
 		},
 		CurvePreferences: []tls.CurveID{
 			tls.X25519,

@@ -1,39 +1,37 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
+	"io"
 	"log"
-	"net/http"
+	"net"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"surely/internal/config"
-	"github.com/quic-go/quic-go/http3"
+	"github.com/quic-go/quic-go"
 )
 
 func main() {
 	configPath := flag.String("config", "config.toml", "Path to configuration file")
 	flag.Parse()
 
-	log.Println("Surely Server v1.0 starting...")
+	log.Println("Surely Server v1.0.1 starting...")
 
-	// 加载配置文件
 	cfg, err := config.LoadServerConfig(*configPath)
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 	log.Printf("Loaded configuration from %s", *configPath)
 
-	// 加载 TLS 证书
 	cert, err := tls.LoadX509KeyPair(cfg.Server.TLSCertPath, cfg.Server.TLSKeyPath)
 	if err != nil {
 		log.Fatalf("Failed to load TLS certificate: %v", err)
 	}
-	log.Printf("Loaded TLS certificate from %s and %s", cfg.Server.TLSCertPath, cfg.Server.TLSKeyPath)
 
-	// 配置 TLS
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		NextProtos:   cfg.TLS.NextProtos,
@@ -51,25 +49,46 @@ func main() {
 		},
 	}
 
-	// 创建 HTTP/3 服务器
-	server := &http3.Server{
-		Addr:      cfg.Server.ListenAddr,
-		TLSConfig: tlsConfig,
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			log.Printf("Received request: %s %s", r.Method, r.URL.Path)
-			w.Write([]byte("Hello from Surely Server v1.0!"))
-		}),
+	quicConfig := &quic.Config{
+		MaxIdleTimeout: config.ParseDuration(cfg.QUIC.MaxIdleTimeout),
+		Allow0RTT:      cfg.QUIC.Enable0RTT,
 	}
 
-	// 启动服务器
+	listener, err := quic.ListenAddr(cfg.Server.ListenAddr, tlsConfig, quicConfig)
+	if err != nil {
+		log.Fatalf("Failed to listen: %v", err)
+	}
+	defer listener.Close()
+
+	log.Printf("Listening on %s", cfg.Server.ListenAddr)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	go func() {
-		log.Printf("Starting HTTP/3 server on %s...", cfg.Server.ListenAddr)
-		if err := server.ListenAndServe(); err != nil {
-			log.Fatalf("Failed to start server: %v", err)
+		for {
+			conn, err := listener.Accept(ctx)
+			if err != nil {
+				log.Printf("Accept error: %v", err)
+				continue
+			}
+
+			log.Printf("New connection accepted")
+
+			go func() {
+				for {
+					stream, err := conn.AcceptStream(ctx)
+					if err != nil {
+						log.Printf("Accept stream error: %v", err)
+						return
+					}
+
+					go handleStream(stream)
+				}
+			}()
 		}
 	}()
 
-	// 等待信号
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
@@ -77,3 +96,43 @@ func main() {
 	log.Println("Shutting down...")
 }
 
+func handleStream(stream quic.Stream) {
+	defer stream.Close()
+
+	buf := make([]byte, 1024)
+	n, err := stream.Read(buf)
+	if err != nil {
+		log.Printf("Read error: %v", err)
+		return
+	}
+
+	target := string(buf[:n])
+	log.Printf("Connect request to: %s", target)
+
+	conn, err := net.Dial("tcp", target)
+	if err != nil {
+		log.Printf("Failed to connect to %s: %v", target, err)
+		return
+	}
+	defer conn.Close()
+
+	_, err = stream.Write([]byte("OK\n"))
+	if err != nil {
+		log.Printf("Failed to send OK: %v", err)
+		return
+	}
+
+	log.Printf("Connected to %s", target)
+
+	go func() {
+		_, err := io.Copy(conn, stream)
+		if err != nil && err != io.EOF {
+			log.Printf("Error copying from client to target: %v", err)
+		}
+	}()
+
+	_, err = io.Copy(stream, conn)
+	if err != nil && err != io.EOF {
+		log.Printf("Error copying from target to client: %v", err)
+	}
+}

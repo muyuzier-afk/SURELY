@@ -1,68 +1,113 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"io"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"surely/internal/config"
-	"surely/pkg/surely-sdk"
+	"surely/internal/transport"
+	"surely/pkg/socks5"
 )
 
 func main() {
 	configPath := flag.String("config", "client-config.toml", "Path to client configuration file")
-	target := flag.String("target", "", "Target path to request")
+	socksAddr := flag.String("socks", ":1080", "SOCKS5 proxy listen address")
 	flag.Parse()
 
-	log.Println("Surely Client v1.0 starting...")
+	log.Println("Surely Client v1.0.1 starting...")
 
-	// 加载配置文件
 	cfg, err := config.LoadClientConfig(*configPath)
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 	log.Printf("Loaded configuration from %s", *configPath)
 
-	// 创建 SDK 客户端
-	serverAddr := "https://" + cfg.Client.ServerAddr
-	client, err := surely_sdk.NewClient(serverAddr, cfg.Client.InsecureSkipVerify)
+	tlsConfig := transport.TLSConfigForClient(cfg.Client.InsecureSkipVerify, cfg.TLS.NextProtos)
+	quicConfig := transport.QUICConfig(
+		config.ParseDuration(cfg.QUIC.MaxIdleTimeout),
+		cfg.QUIC.Enable0RTT,
+	)
+
+	transportConfig := &transport.Config{
+		TLSConfig:  tlsConfig,
+		QUICConfig: quicConfig,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	transClient, err := transport.NewClient(ctx, cfg.Client.ServerAddr, transportConfig)
 	if err != nil {
-		log.Fatalf("Failed to create client: %v", err)
+		log.Fatalf("Failed to connect to server: %v", err)
 	}
-	defer client.Close()
+	defer transClient.Close()
 
-	log.Printf("Connected to server: %s", serverAddr)
+	log.Printf("Connected to server: %s", cfg.Client.ServerAddr)
 
-	// 如果指定了目标，发送请求
-	if *target != "" {
-		log.Printf("Sending request to: %s", *target)
-		resp, err := client.Get(*target)
+	socksServer := socks5.NewServer(*socksAddr, func(conn net.Conn, target string) error {
+		log.Printf("Proxying connection to: %s", target)
+
+		stream, err := transClient.OpenStream()
 		if err != nil {
-			log.Fatalf("Failed to send request: %v", err)
+			log.Printf("Failed to open stream: %v", err)
+			return err
 		}
-		defer resp.Body.Close()
+		defer stream.Close()
 
-		log.Printf("Response status: %s", resp.Status)
-
-		// 读取响应
-		body, err := io.ReadAll(resp.Body)
+		_, err = stream.Write([]byte("CONNECT " + target + "\n"))
 		if err != nil {
-			log.Fatalf("Failed to read response: %v", err)
+			log.Printf("Failed to send connect: %v", err)
+			return err
 		}
 
-		log.Printf("Response body: %s", body)
-	} else {
-		log.Println("No target specified, waiting...")
-	}
+		buf := make([]byte, 1024)
+		n, err := stream.Read(buf)
+		if err != nil {
+			log.Printf("Failed to read response: %v", err)
+			return err
+		}
 
-	// 等待信号
+		if string(buf[:n]) != "OK\n" {
+			log.Printf("Unexpected response: %s", string(buf[:n]))
+			return io.ErrUnexpectedEOF
+		}
+
+		log.Printf("Connected to %s via proxy", target)
+
+		go func() {
+			_, err := io.Copy(stream, conn)
+			if err != nil && err != io.EOF {
+				log.Printf("Error copying from client to server: %v", err)
+			}
+		}()
+
+		_, err = io.Copy(conn, stream)
+		if err != nil && err != io.EOF {
+			log.Printf("Error copying from server to client: %v", err)
+		}
+
+		return nil
+	})
+
+	go func() {
+		if err := socksServer.ListenAndServe(); err != nil {
+			log.Fatalf("SOCKS5 server error: %v", err)
+		}
+	}()
+
+	log.Printf("SOCKS5 proxy listening on %s", *socksAddr)
+	log.Println("Client is ready. Configure your browser/app to use SOCKS5 proxy at", *socksAddr)
+
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	<-sigChan
 	log.Println("Shutting down...")
 }
-

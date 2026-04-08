@@ -31,6 +31,13 @@ type Message struct {
 	Payload []byte
 }
 
+// Transport 传输层接口
+type Transport interface {
+	OpenStream() (quic.Stream, error)
+	AcceptStream(ctx context.Context) (quic.Stream, error)
+	Close() error
+}
+
 // Server 协议服务器
 type Server struct {
 	transport Transport
@@ -39,13 +46,6 @@ type Server struct {
 // Client 协议客户端
 type Client struct {
 	transport Transport
-}
-
-// Transport 传输层接口
-type Transport interface {
-	OpenStream() (quic.Stream, error)
-	AcceptStream(ctx context.Context) (quic.Stream, error)
-	Close() error
 }
 
 // NewServer 创建新的协议服务器
@@ -105,11 +105,9 @@ func (s *Server) HandleStream(stream quic.Stream) {
 
 // handleConnect 处理连接请求
 func (s *Server) handleConnect(writer *bufio.Writer, stream quic.Stream, payload []byte) {
-	// 解析目标地址
 	target := string(payload)
 	log.Printf("Connect request to: %s", target)
 
-	// 尝试连接到目标
 	conn, err := net.Dial("tcp", target)
 	if err != nil {
 		log.Printf("Failed to connect to %s: %v", target, err)
@@ -117,7 +115,6 @@ func (s *Server) handleConnect(writer *bufio.Writer, stream quic.Stream, payload
 	}
 	defer conn.Close()
 
-	// 发送连接确认
 	ackMsg := &Message{
 		Type:    MessageTypeConnectAck,
 		Payload: []byte("OK"),
@@ -130,14 +127,41 @@ func (s *Server) handleConnect(writer *bufio.Writer, stream quic.Stream, payload
 
 	writer.Flush()
 
-	// 双向转发数据
-	go io.Copy(conn, stream)
-	io.Copy(stream, conn)
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := conn.Read(buf)
+			if err != nil {
+				break
+			}
+			dataMsg := &Message{
+				Type:    MessageTypeData,
+				Payload: buf[:n],
+			}
+			if err := WriteMessage(writer, dataMsg); err != nil {
+				break
+			}
+			writer.Flush()
+		}
+	}()
+
+	buf := make([]byte, 4096)
+	for {
+		msg, err := ReadMessage(reader)
+		if err != nil {
+			break
+		}
+		if msg.Type == MessageTypeData {
+			_, err = conn.Write(msg.Payload)
+			if err != nil {
+				break
+			}
+		}
+	}
 }
 
 // handleData 处理数据
 func (s *Server) handleData(stream quic.Stream, payload []byte) {
-	// 直接转发数据
 	if _, err := stream.Write(payload); err != nil {
 		log.Printf("Error writing data: %v", err)
 	}
@@ -165,7 +189,6 @@ func (c *Client) Connect(target string) error {
 	}
 	defer stream.Close()
 
-	// 发送连接请求
 	connectMsg := &Message{
 		Type:    MessageTypeConnect,
 		Payload: []byte(target),
@@ -178,7 +201,6 @@ func (c *Client) Connect(target string) error {
 
 	writer.Flush()
 
-	// 等待连接确认
 	reader := bufio.NewReader(stream)
 	msg, err := ReadMessage(reader)
 	if err != nil {
@@ -233,7 +255,6 @@ func (c *Client) Ping() error {
 
 	writer.Flush()
 
-	// 等待 pong
 	reader := bufio.NewReader(stream)
 	msg, err := ReadMessage(reader)
 	if err != nil {
@@ -254,7 +275,6 @@ func (c *Client) Close() error {
 
 // ReadMessage 读取消息
 func ReadMessage(reader *bufio.Reader) (*Message, error) {
-	// 读取消息头
 	header := make([]byte, 5)
 	if _, err := io.ReadFull(reader, header); err != nil {
 		return nil, err
@@ -263,7 +283,6 @@ func ReadMessage(reader *bufio.Reader) (*Message, error) {
 	msgType := MessageType(header[0])
 	payloadLen := binary.BigEndian.Uint32(header[1:5])
 
-	// 读取消息体
 	payload := make([]byte, payloadLen)
 	if _, err := io.ReadFull(reader, payload); err != nil {
 		return nil, err
@@ -277,7 +296,6 @@ func ReadMessage(reader *bufio.Reader) (*Message, error) {
 
 // WriteMessage 写入消息
 func WriteMessage(writer *bufio.Writer, msg *Message) error {
-	// 写入消息头
 	header := make([]byte, 5)
 	header[0] = byte(msg.Type)
 	binary.BigEndian.PutUint32(header[1:5], uint32(len(msg.Payload)))
@@ -286,7 +304,6 @@ func WriteMessage(writer *bufio.Writer, msg *Message) error {
 		return err
 	}
 
-	// 写入消息体
 	if _, err := writer.Write(msg.Payload); err != nil {
 		return err
 	}

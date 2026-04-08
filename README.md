@@ -193,8 +193,6 @@ go build -o surely-client ./cmd/surely-client
 
 ## License
 
-This project is licensed under the CC0 1.0 Universal.
+This project is licensed under the MIT License.
 
-To the extent possible under law, the authors have waived all copyright and related or neighboring rights to this work. This work is published from the United States.
-
-For more information, see <https://creativecommons.org/publicdomain/zero/1.0/>
+For more information, see the [LICENSE](LICENSE) file.

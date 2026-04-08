@@ -1,0 +1,19 @@
+# Surely Client Configuration
+[client]
+server_addr = "localhost:8443"
+insecure_skip_verify = true
+
+[tls]
+min_version = "TLSv1.3"
+max_version = "TLSv1.3"
+next_protos = ["h3"]
+
+[quic]
+max_idle_timeout = "30s"
+enable_0rtt = true
+
+[traffic]
+enable_padding = true
+enable_jitter = true
+jitter_min = "5ms"
+jitter_max = "50ms"

@@ -1,0 +1,27 @@
+# Surely Server Configuration
+[server]
+listen_addr = ":8443"
+tls_cert_path = "server.crt"
+tls_key_path = "server.key"
+enable_http3 = true
+
+[tls]
+min_version = "TLSv1.3"
+max_version = "TLSv1.3"
+next_protos = ["h3"]
+
+[quic]
+max_idle_timeout = "30s"
+enable_0rtt = true
+connection_migration = true
+
+[traffic]
+packet_length_distribution = [64, 128, 256, 512, 1024, 1500]
+jitter_min = "5ms"
+jitter_max = "50ms"
+background_noise = true
+noise_interval = "30s"
+
+[masque]
+enable_connect = true
+enable_datagram = true

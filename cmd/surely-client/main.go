@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"io"
 	"log"
@@ -12,8 +13,9 @@ import (
 	"time"
 
 	"surely/internal/config"
-	"surely/internal/transport"
 	"surely/pkg/socks5"
+
+	"github.com/quic-go/quic-go"
 )
 
 func main() {
@@ -29,66 +31,76 @@ func main() {
 	}
 	log.Printf("Loaded configuration from %s", *configPath)
 
-	tlsConfig := transport.TLSConfigForClient(cfg.Client.InsecureSkipVerify, cfg.TLS.NextProtos)
-	quicConfig := transport.QUICConfig(
-		config.ParseDuration(cfg.QUIC.MaxIdleTimeout),
-		cfg.QUIC.Enable0RTT,
-	)
-
-	transportConfig := &transport.Config{
-		TLSConfig:  tlsConfig,
-		QUICConfig: quicConfig,
+	// 创建 TLS 配置
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: cfg.Client.InsecureSkipVerify,
+		NextProtos:         cfg.TLS.NextProtos,
+		MinVersion:         tls.VersionTLS13,
+		MaxVersion:         tls.VersionTLS13,
 	}
 
+	// 创建 QUIC 配置
+	quicConfig := &quic.Config{
+		MaxIdleTimeout: config.ParseDuration(cfg.QUIC.MaxIdleTimeout),
+		Allow0RTT:      cfg.QUIC.Enable0RTT,
+	}
+
+	// 建立 QUIC 连接
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	transClient, err := transport.NewClient(ctx, cfg.Client.ServerAddr, transportConfig)
+	conn, err := quic.DialAddr(ctx, cfg.Client.ServerAddr, tlsConfig, quicConfig)
 	if err != nil {
 		log.Fatalf("Failed to connect to server: %v", err)
 	}
-	defer transClient.Close()
+	defer conn.CloseWithError(0, "")
 
 	log.Printf("Connected to server: %s", cfg.Client.ServerAddr)
 
-	socksServer := socks5.NewServer(*socksAddr, func(conn net.Conn, target string) error {
+	socksServer := socks5.NewServer(*socksAddr, func(clientConn net.Conn, target string) error {
 		log.Printf("Proxying connection to: %s", target)
 
-		stream, err := transClient.OpenStream()
+		// 创建 QUIC 流
+		stream, err := conn.OpenStreamSync(context.Background())
 		if err != nil {
 			log.Printf("Failed to open stream: %v", err)
 			return err
 		}
 		defer stream.Close()
 
-		_, err = stream.Write([]byte("CONNECT " + target + "\n"))
+		// 发送 MASQUE CONNECT 请求
+		_, err = stream.Write([]byte("CONNECT " + target + " HTTP/3\r\n\r\n"))
 		if err != nil {
-			log.Printf("Failed to send connect: %v", err)
+			log.Printf("Failed to send MASQUE request: %v", err)
 			return err
 		}
 
+		// 读取 MASQUE 响应
 		buf := make([]byte, 1024)
 		n, err := stream.Read(buf)
 		if err != nil {
-			log.Printf("Failed to read response: %v", err)
+			log.Printf("Failed to read MASQUE response: %v", err)
 			return err
 		}
 
-		if string(buf[:n]) != "OK\n" {
-			log.Printf("Unexpected response: %s", string(buf[:n]))
+		// 验证响应
+		response := string(buf[:n])
+		if len(response) < 13 || response[:12] != "HTTP/3 200 " {
+			log.Printf("Unexpected MASQUE response: %s", response)
 			return io.ErrUnexpectedEOF
 		}
 
-		log.Printf("Connected to %s via proxy", target)
+		log.Printf("Connected to %s via MASQUE proxy", target)
 
+		// 双向数据转发
 		go func() {
-			_, err := io.Copy(stream, conn)
+			_, err := io.Copy(stream, clientConn)
 			if err != nil && err != io.EOF {
 				log.Printf("Error copying from client to server: %v", err)
 			}
 		}()
 
-		_, err = io.Copy(conn, stream)
+		_, err = io.Copy(clientConn, stream)
 		if err != nil && err != io.EOF {
 			log.Printf("Error copying from server to client: %v", err)
 		}

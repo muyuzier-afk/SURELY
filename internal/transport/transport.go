@@ -26,7 +26,7 @@ type Config struct {
 
 // Server 传输层服务器
 type Server struct {
-	listener quic.Listener
+	listener *quic.Listener
 	config   *Config
 }
 
@@ -75,6 +75,11 @@ func NewClient(ctx context.Context, addr string, config *Config) (*Client, error
 	return &Client{
 		conn: conn,
 	}, nil
+}
+
+// Connection 获取底层 QUIC 连接
+func (c *Client) Connection() quic.Connection {
+	return c.conn
 }
 
 // OpenStream 打开新的流

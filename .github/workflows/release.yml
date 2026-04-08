@@ -30,8 +30,8 @@ jobs:
         with:
           tag_name: ${{ steps.get_version.outputs.VERSION }}
           name: Release ${{ steps.get_version.outputs.VERSION }}
-          files:
-            - surely-server
-            - surely-client
+          files: |
+            surely-server
+            surely-client
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
